@@ -3,6 +3,7 @@ from typing import Literal, Tuple
 
 import torch
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from .elements import Element
 from .materials import Material
@@ -277,6 +278,119 @@ class FEM(ABC):
 
         return F.index_add_(0, indices, values)
 
+    def _newton_iteration(
+        self,
+        du: Tensor,
+        K: Tensor,
+        u: Tensor,
+        defgrad: Tensor,
+        stress: Tensor,
+        state: Tensor,
+        n: int,
+        i: int,
+        DU: Tensor,
+        de0: Tensor,
+        nlgeom: bool,
+        F_ext: Tensor,
+        B: Tensor,
+        stol: float,
+        device: str | None,
+        method: Literal["spsolve", "minres", "cg", "pardiso"] | None,
+        use_cached_solve: bool,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """A single Newton-Raphson iteration."""
+        con = torch.nonzero(self.constraints.ravel(), as_tuple=False).ravel()
+        du[con] = DU[con]
+
+        # Element-wise integration
+        k, f_i = self.integrate_material(
+            u, defgrad, stress, state, n, i, du, de0, nlgeom
+        )
+
+        # Assemble global stiffness matrix and internal force vector (if needed)
+        if K.numel() == 0 or not self.material.n_state == 0 or nlgeom:
+            K = self.assemble_stiffness(k, con)
+        F_int = self.assemble_force(f_i)
+
+        # Compute residual
+        residual = F_int - F_ext
+        residual[con] = 0.0
+        res_norm = torch.linalg.norm(residual)
+
+        # Use cached solve from previous iteration if available
+        if i == 0 and use_cached_solve:
+            cached_solve = self.cached_solve
+        else:
+            cached_solve = CachedSolve()
+
+        # Only update cache on first iteration
+        update_cache = i == 0
+
+        # Solve for displacement increment
+        du -= sparse_solve(
+            K,
+            residual,
+            B,
+            stol,
+            device,
+            method,
+            None,
+            cached_solve,
+            update_cache,
+        )
+        return du, K, F_int, res_norm
+
+    def _newton_chunk(
+        self,
+        du: Tensor,
+        K: Tensor,
+        u: Tensor,
+        defgrad: Tensor,
+        stress: Tensor,
+        state: Tensor,
+        n: int,
+        DU: Tensor,
+        de0: Tensor,
+        nlgeom: bool,
+        F_ext: Tensor,
+        B: Tensor,
+        stol: float,
+        device: str | None,
+        method: Literal["spsolve", "minres", "cg", "pardiso"] | None,
+        use_cached_solve: bool,
+        i_start: int,
+        i_end: int,
+        res_norm0: Tensor,
+        rtol: float,
+        atol: float,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """A chunk of Newton-Raphson iterations for checkpointing."""
+        for i in range(i_start, i_end):
+            du, K, F_int, res_norm = self._newton_iteration(
+                du,
+                K,
+                u,
+                defgrad,
+                stress,
+                state,
+                n,
+                i,
+                DU,
+                de0,
+                nlgeom,
+                F_ext,
+                B,
+                stol,
+                device,
+                method,
+                use_cached_solve,
+            )
+            if i == 0 and i_start == 0:
+                res_norm0 = res_norm
+            if res_norm < rtol * res_norm0 or res_norm < atol:
+                break
+        return du, K, F_int, res_norm, res_norm0
+
     def solve(
         self,
         increments: Tensor = torch.tensor([0.0, 1.0]),
@@ -291,6 +405,7 @@ class FEM(ABC):
         aggregate_integration_points: bool = True,
         use_cached_solve: bool = False,
         nlgeom: bool = False,
+        n_checkpointed: int | None = None,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Solve the FEM problem with the Newton-Raphson method.
 
@@ -307,6 +422,7 @@ class FEM(ABC):
             aggregate_integration_points (bool): Aggregate integration points if True.
             use_cached_solve (bool): Use cached solve, e.g. in topology optimization.
             nlgeom (bool): Use nonlinear geometry if True.
+            n_checkpointed (int | None): Number of Newton iterations per checkpoint.
 
         Returns:
                 Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Final displacements,
@@ -318,9 +434,6 @@ class FEM(ABC):
 
         # Null space rigid body modes for AMG preconditioner
         B = self.compute_B()
-
-        # Indexes of constrained and unconstrained degrees of freedom
-        con = torch.nonzero(self.constraints.ravel(), as_tuple=False).ravel()
 
         # Initialize variables to be computed
         u = torch.zeros(N, self.n_nod, self.n_dim)
@@ -354,57 +467,71 @@ class FEM(ABC):
             de0 = inc * self.ext_strain
 
             # Newton-Raphson iterations
-            for i in range(max_iter):
-                du[con] = DU[con]
-
-                # Element-wise integration
-                k, f_i = self.integrate_material(
-                    u, defgrad, stress, state, n, i, du, de0, nlgeom
-                )
-
-                # Assemble global stiffness matrix and internal force vector (if needed)
-                if self.K.numel() == 0 or not self.material.n_state == 0 or nlgeom:
-                    self.K = self.assemble_stiffness(k, con)
-                F_int = self.assemble_force(f_i)
-
-                # Compute residual
-                residual = F_int - F_ext
-                residual[con] = 0.0
-                res_norm = torch.linalg.norm(residual)
-
-                # Save initial residual
-                if i == 0:
-                    res_norm0 = res_norm
-
-                # Print iteration information
-                if verbose:
-                    print(f"Increment {n} | Iteration {i+1} | Residual: {res_norm:.5e}")
-
-                # Check convergence
-                if res_norm < rtol * res_norm0 or res_norm < atol:
-                    break
-
-                # Use cached solve from previous iteration if available
-                if i == 0 and use_cached_solve:
-                    cached_solve = self.cached_solve
-                else:
-                    cached_solve = CachedSolve()
-
-                # Only update cache on first iteration
-                update_cache = i == 0
-
-                # Solve for displacement increment
-                du -= sparse_solve(
-                    self.K,
-                    residual,
-                    B,
-                    stol,
-                    device,
-                    method,
-                    None,
-                    cached_solve,
-                    update_cache,
-                )
+            res_norm0 = torch.tensor(float("inf"))
+            if n_checkpointed is None:
+                for i in range(max_iter):
+                    du, self.K, F_int, res_norm = self._newton_iteration(
+                        du,
+                        self.K,
+                        u,
+                        defgrad,
+                        stress,
+                        state,
+                        n,
+                        i,
+                        DU,
+                        de0,
+                        nlgeom,
+                        F_ext,
+                        B,
+                        stol,
+                        device,
+                        method,
+                        use_cached_solve,
+                    )
+                    if i == 0:
+                        res_norm0 = res_norm
+                    if verbose:
+                        print(
+                            f"Increment {n} | Iteration {i+1} | Residual: {res_norm:.5e}"
+                        )
+                    if res_norm < rtol * res_norm0 or res_norm < atol:
+                        break
+            else:
+                for i in range(0, max_iter, n_checkpointed):
+                    i_start = i
+                    i_end = min(i + n_checkpointed, max_iter)
+                    du, self.K, F_int, res_norm, res_norm0 = checkpoint(
+                        self._newton_chunk,
+                        du,
+                        self.K,
+                        u,
+                        defgrad,
+                        stress,
+                        state,
+                        n,
+                        DU,
+                        de0,
+                        nlgeom,
+                        F_ext,
+                        B,
+                        stol,
+                        device,
+                        method,
+                        use_cached_solve,
+                        i_start,
+                        i_end,
+                        res_norm0,
+                        rtol,
+                        atol,
+                        use_reentrant=False,
+                    )
+                    if verbose:
+                        print(
+                            f"Increment {n} | Iteration {i_end} | Residual: {res_norm:.5e}"
+                        )
+                    if res_norm < rtol * res_norm0 or res_norm < atol:
+                        break
 
             if res_norm > rtol * res_norm0 and res_norm > atol:
                 raise Exception("Newton-Raphson iteration did not converge.")
