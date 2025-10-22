@@ -160,6 +160,7 @@ class Tria2(Element):
 class Quad1(Element):
     def __init__(self):
         self.nodes = 4
+        self.faces = torch.tensor([[0, 1], [1, 2], [2, 3], [3, 0]])
 
     def N(self, xi: Tensor) -> Tensor:
         N_1 = (1.0 - xi[..., 0]) * (1.0 - xi[..., 1])
@@ -270,6 +271,12 @@ class Quad2(Element):
 class Tetra1(Element):
     def __init__(self):
         self.nodes = 4
+        # Faces are opposite to the node index.
+        # Face 0: nodes 1, 2, 3
+        # Face 1: nodes 0, 2, 3
+        # Face 2: nodes 0, 1, 3
+        # Face 3: nodes 0, 1, 2
+        self.faces = torch.tensor([[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]])
 
     def N(self, xi: Tensor) -> Tensor:
         N_1 = 1.0 - xi[..., 0] - xi[..., 1] - xi[..., 2]
@@ -294,6 +301,12 @@ class Tetra1(Element):
 
     def iweights(self) -> Tensor:
         return torch.tensor([1.0 / 6.0])
+
+    def face_ipoints(self) -> Tensor:
+        return torch.tensor([[1.0 / 3.0, 1.0 / 3.0]])
+
+    def face_iweights(self) -> Tensor:
+        return torch.tensor([0.5])
 
 
 class Tetra2(Element):
@@ -385,6 +398,16 @@ class Tetra2(Element):
 class Hexa1(Element):
     def __init__(self):
         self.nodes = 8
+        self.faces = torch.tensor(
+            [
+                [0, 1, 2, 3],
+                [4, 5, 6, 7],
+                [0, 1, 5, 4],
+                [1, 2, 6, 5],
+                [2, 3, 7, 6],
+                [3, 0, 4, 7],
+            ]
+        )
 
     def N(self, xi: Tensor) -> Tensor:
         N_1 = (1.0 - xi[..., 0]) * (1.0 - xi[..., 1]) * (1.0 - xi[..., 2])

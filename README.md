@@ -46,6 +46,10 @@ pip install cupy-cuda12x # v12.x
 - Utilities
   - Homogenization of orthotropic elasticity for composites
   - I/O to and from other mesh formats via meshio
+- Acoustics
+  - Helmholtz equation for time-harmonic acoustics
+  - Support for Dirichlet, Neumann, and Robin (absorbing) boundary conditions
+  - See the [acoustics example](examples/acoustics/helmholtz.ipynb)
 
 ## Basic examples
 The subdirectory `examples->basic` contains a couple of Jupyter Notebooks demonstrating the use of torch-fem for trusses, planar problems, shells and solids. You may click on the examples to check out the notebooks online.
