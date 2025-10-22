@@ -21,4 +21,6 @@ dist
 
 # VTU files except for the ones in the folder data 
 *.vtu
-!src/torchfem/data/*.vtu
+!src/torchfem/data/*.vtu# pixi environments
+.pixi/*
+!.pixi/config.toml

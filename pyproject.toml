@@ -28,7 +28,7 @@ dependencies = [
     "meshzoo",
     "pyamg",
     "pyvista",
-    "scipy~=1.15.0",
+    "scipy",
     "tqdm",
     "torch",
     "trame",
@@ -47,3 +47,19 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 torchfem = ["data/*.*"]
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["win-64"]
+
+[tool.pixi.pypi-dependencies]
+torch-fem = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+test = "python -m pytest"
+
+[tool.pixi.dependencies]
+python = "==3.12"
+pytest = ">=8.4.2,<9"
+testbook = ">=0.4.2,<0.5"
+scipy = "<1.14"
+pyamg = "<5.3.0"
